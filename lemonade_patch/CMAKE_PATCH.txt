@@ -1,0 +1,18 @@
+Add this single entry to the existing LEMON_BACKENDS list in the root CMakeLists.txt:
+
+    "cake|cake"
+
+The current Lemonade backend registry codegen will discover:
+
+    src/cpp/include/lemon/backends/cake/cake.h
+    src/cpp/include/lemon/backends/cake/cake_server.h
+    src/cpp/server/backends/cake/cake_server.cpp
+
+Do not hand-edit generated backend registry files or generated docs.
+
+For a source-tree development build, place the compiled `lemonade-cake-bridge`
+where `BackendUtils::get_backend_binary_path()` can resolve it, or temporarily
+adjust the Cake backend binary resolution during the spike.
+
+The next packaging step should add a backend_versions.json entry and installer
+recipe for `lemonade-cake-bridge`; that is intentionally not guessed here.
