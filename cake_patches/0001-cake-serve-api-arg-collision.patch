@@ -1,0 +1,28 @@
+diff --git a/cake-cli/src/main.rs b/cake-cli/src/main.rs
+index 96f5996..5b5066f 100644
+--- a/cake-cli/src/main.rs
++++ b/cake-cli/src/main.rs
+@@ -42,9 +42,8 @@ enum Commands {
+         /// Model name or HuggingFace repo
+         #[arg(id = "model_name")]
+         model: String,
+-        /// API bind address
+-        #[arg(long = "api", default_value = "0.0.0.0:8080")]
+-        address: String,
++        // The API bind address comes from the flattened Args (`--api`). A separate field here
++        // reused the ids `address` and `api`, so clap rejected every `cake serve` invocation.
+         #[command(flatten)]
+         args: Args,
+     },
+@@ -135,9 +134,9 @@ async fn main() -> Result<()> {
+                 }
+             }
+         }
+-        Commands::Serve { model, address, mut args } => {
++        Commands::Serve { model, mut args } => {
+             args.model = model;
+-            args.api = Some(address);
++            args.api = Some(args.api.take().unwrap_or_else(|| "0.0.0.0:8080".to_string()));
+             args.mode = Mode::Master;
+             run_as_master(args).await
+         }
