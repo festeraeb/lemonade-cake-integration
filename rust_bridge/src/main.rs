@@ -57,6 +57,12 @@ struct Args {
     #[arg(long, default_value_t = 600)]
     startup_timeout_seconds: u64,
 
+    /// Name of the runtime the command template launches. "cake" keeps the original
+    /// check (an OpenAI `data` array); any other name must appear as `owned_by` of a
+    /// model in the runtime's `/v1/models` before the fingerprint claims it.
+    #[arg(long, env = "LEMONADE_RUNTIME_NAME", default_value = "cake")]
+    runtime_name: String,
+
     #[arg(long, default_value = "info")]
     log_level: String,
 }
@@ -96,8 +102,8 @@ enum ControlCapability {
 #[derive(Debug, Clone, Serialize)]
 struct RuntimeFingerprint {
     schema: &'static str,
-    observed_runtime: &'static str,
-    claimed_runtime: &'static str,
+    observed_runtime: String,
+    claimed_runtime: String,
     bridge_version: &'static str,
     model: String,
     cake_base_url: String,
@@ -127,6 +133,7 @@ struct AppState {
     cake_base_url: String,
     model: String,
     cake_command: String,
+    runtime_name: String,
     child: Mutex<Option<Child>>,
 }
 
@@ -154,6 +161,18 @@ fn render_command(template: &str, model: &str, port: u16, device: u32) -> String
 /// OpenAI-style `data` array.
 fn models_identify_cake(models: &Value) -> bool {
     models.get("data").map(Value::is_array).unwrap_or(false)
+}
+
+/// Generic identity check used for every runtime name.
+fn models_identify_runtime(models: &Value, runtime_name: &str) -> bool {
+    if runtime_name == "cake" {
+        return models_identify_cake(models);
+    }
+    models
+        .get("data")
+        .and_then(Value::as_array)
+        .map(|a| a.iter().any(|m| m.get("owned_by").and_then(Value::as_str) == Some(runtime_name)))
+        .unwrap_or(false)
 }
 
 fn command_sha256(command: &str) -> String {
@@ -273,12 +292,12 @@ async fn runtime_fingerprint(State(state): State<Arc<AppState>>) -> Response {
         _ => json!(null),
     };
 
-    let observed_cake = models_identify_cake(&models);
+    let observed = models_identify_runtime(&models, &state.runtime_name);
 
     Json(RuntimeFingerprint {
         schema: "lemonade.runtime-fingerprint.v1",
-        observed_runtime: if observed_cake { "cake" } else { "unknown" },
-        claimed_runtime: "cake",
+        observed_runtime: if observed { state.runtime_name.clone() } else { "unknown".to_string() },
+        claimed_runtime: state.runtime_name.clone(),
         bridge_version: env!("CARGO_PKG_VERSION"),
         model: state.model.clone(),
         cake_base_url: state.cake_base_url.clone(),
@@ -287,7 +306,7 @@ async fn runtime_fingerprint(State(state): State<Arc<AppState>>) -> Response {
         cake_command_sha256: command_sha256(&state.cake_command),
         verified_at_unix_ms: now_ms(),
         cake_models_observed: models,
-        runtime_identity_verified: observed_cake,
+        runtime_identity_verified: observed,
     })
     .into_response()
 }
@@ -476,6 +495,7 @@ async fn main() -> Result<()> {
             args.cake_port,
             args.cake_device,
         ),
+        runtime_name: args.runtime_name.clone(),
         child: Mutex::new(Some(child)),
     });
 
@@ -544,6 +564,15 @@ mod tests {
         assert!(!models_identify_cake(&json!({"data": {}})));
         assert!(!models_identify_cake(&json!({"models": []})));
         assert!(!models_identify_cake(&json!(null)));
+    }
+
+    #[test]
+    fn non_cake_runtime_requires_owned_by() {
+        let m = json!({"data": [{"id": "bitnet", "owned_by": "lemonade-burn"}]});
+        assert!(models_identify_runtime(&m, "lemonade-burn"));
+        assert!(!models_identify_runtime(&json!({"data": [{"id": "x"}]}), "lemonade-burn"));
+        assert!(!models_identify_runtime(&m, "other"));
+        assert!(models_identify_runtime(&json!({"data": []}), "cake"));
     }
 
     #[test]
