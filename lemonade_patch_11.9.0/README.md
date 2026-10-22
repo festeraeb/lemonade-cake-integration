@@ -12,3 +12,5 @@ headers cpp-httplib needs.
 
 The descriptor declares no `support` rows, so the recipe is not listed in
 `/api/v1/system-info`; it is accepted as a recipe by `/api/v1/pull`.
+
+Note (2026-10-22): the `cake_port` option default must be a string (`""`); a numeric default makes every load fail with `[json.exception.type_error.302] type must be string, but is number` (found while loading the sibling lemonade-burn backend; the adapter keeps 18080 as its in-code default).

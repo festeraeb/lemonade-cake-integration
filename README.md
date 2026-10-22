@@ -83,3 +83,5 @@ It exposes enough evidence for a future `MoeTelemetryProvider`:
 
 `POST /internal/placement/apply` intentionally returns `501 Not Implemented`.
 PAMP remains shadow-only.
+
+Fix 2026-10-22: the `cake_port` descriptor default is now `""` (string); a numeric default made `RecipeOptions::get_option` throw `type must be string, but is number` on every Cake load.

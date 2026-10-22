@@ -19,7 +19,7 @@ inline const BackendDescriptor descriptor = {
     /*options*/ {
         {"cake_args", "--cake-args", "", "ARGS",
          "Cake command template or extra bridge arguments", "Cake Options"},
-        {"cake_port", "--cake-port", 18080, "PORT",
+        {"cake_port", "--cake-port", "", "PORT",
          "Private Cake port used behind the Rust bridge", "Cake Options"},
     },
     /*support*/ {},
