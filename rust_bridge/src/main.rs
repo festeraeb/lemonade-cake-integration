@@ -43,10 +43,12 @@ struct Args {
     #[arg(long)]
     model: String,
 
+    /// Placeholders: {model}, {port} (the API port), {worker_port} (port + 1, Cake's cluster port; without
+    /// --address, `cake serve` binds it on 0.0.0.0) and {device}.
     #[arg(
         long,
         env = "LEMONADE_CAKE_COMMAND",
-        default_value = "cake master --model {model} --api 127.0.0.1:{port} --device {device}"
+        default_value = "cake serve {model} --api 127.0.0.1:{port} --address 127.0.0.1:{worker_port} --device {device}"
     )]
     cake_command: String,
 
@@ -151,8 +153,10 @@ fn now_ms() -> u128 {
 }
 
 fn render_command(template: &str, model: &str, port: u16, device: u32) -> String {
+    let worker_port = port.checked_add(1).map(|p| p.to_string()).unwrap_or_else(|| "0".into());
     template
         .replace("{model}", model)
+        .replace("{worker_port}", &worker_port)
         .replace("{port}", &port.to_string())
         .replace("{device}", &device.to_string())
 }
@@ -181,11 +185,40 @@ fn command_sha256(command: &str) -> String {
     format!("{:x}", hasher.finalize())
 }
 
+/// On unix the shell leads a new process group (pgid = its pid), so shutdown can signal the runtime
+/// and anything else the template started, not just the shell.
 #[cfg(unix)]
 fn command_from_template(rendered: &str) -> Command {
     let mut cmd = Command::new("sh");
-    cmd.arg("-lc").arg(rendered);
+    cmd.arg("-lc").arg(rendered).process_group(0);
     cmd
+}
+
+/// SIGTERM the whole group, wait up to `grace` for it to empty, then SIGKILL what is left.
+/// An already-empty group is not an error.
+#[cfg(unix)]
+fn kill_process_group(pgid: u32, grace: Duration) {
+    let group = format!("-{pgid}");
+    let signal = |sig: &str| {
+        std::process::Command::new("kill")
+            .args([sig, "--", &group])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false)
+    };
+    if !signal("-TERM") {
+        return;
+    }
+    let deadline = std::time::Instant::now() + grace;
+    while std::time::Instant::now() < deadline {
+        if !signal("-0") {
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    signal("-KILL");
 }
 
 #[cfg(windows)]
@@ -525,6 +558,12 @@ async fn main() -> Result<()> {
     }
 
     if let Some(mut child) = state.child.lock().await.take() {
+        #[cfg(unix)]
+        if let Some(pid) = child.id() {
+            tokio::task::spawn_blocking(move || kill_process_group(pid, Duration::from_secs(5)))
+                .await
+                .ok();
+        }
         let _ = child.kill().await;
         let _ = child.wait().await;
     }
@@ -538,8 +577,8 @@ mod tests {
 
     #[test]
     fn render_command_substitutes_all_placeholders() {
-        let out = render_command("cake master --model {model} --api 127.0.0.1:{port} --device {device}", "org/m", 18080, 2);
-        assert_eq!(out, "cake master --model org/m --api 127.0.0.1:18080 --device 2");
+        let out = render_command("cake serve {model} --api 127.0.0.1:{port} --device {device}", "org/m", 18080, 2);
+        assert_eq!(out, "cake serve org/m --api 127.0.0.1:18080 --device 2");
     }
 
     #[test]
@@ -549,12 +588,42 @@ mod tests {
     }
 
     #[test]
+    fn render_command_fills_worker_port() {
+        assert_eq!(render_command("{port} {worker_port}", "m", 18492, 0), "18492 18493");
+        assert_eq!(render_command("{worker_port}", "m", u16::MAX, 0), "0");
+    }
+
+    // cake 0.1.0 has no `master` subcommand (its commands are run, serve, pull, list, chat, rm, split);
+    // `cake serve` is the OpenAI-compatible server. Checked with `cake --help` on cesarops3, 2026-10-22.
+    #[test]
     fn default_template_matches_cake_0_1_0_cli() {
         let args = Args::parse_from(["bridge", "--listen-port", "1", "--model", "m"]);
-        assert!(args.cake_command.starts_with("cake master "));
+        assert!(args.cake_command.starts_with("cake serve {model} "));
         assert!(args.cake_command.contains("--api 127.0.0.1:{port}"));
-        assert!(!args.cake_command.contains("serve"));
+        assert!(args.cake_command.contains("--address 127.0.0.1:{worker_port}"));
+        assert!(!args.cake_command.contains("master"));
         assert_eq!(args.cake_device, 0);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn kill_process_group_reaches_grandchildren() {
+        use std::io::{BufRead, BufReader};
+        use std::os::unix::process::CommandExt;
+        let mut child = std::process::Command::new("sh")
+            .args(["-c", "sleep 300 & echo $!; wait"])
+            .process_group(0)
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let mut line = String::new();
+        BufReader::new(child.stdout.take().unwrap()).read_line(&mut line).unwrap();
+        let grandchild: u32 = line.trim().parse().unwrap();
+        let alive = |pid: u32| std::process::Command::new("kill").args(["-0", &pid.to_string()]).stderr(Stdio::null()).status().unwrap().success();
+        assert!(alive(grandchild));
+        kill_process_group(child.id(), Duration::from_secs(2));
+        child.wait().unwrap();
+        assert!(!alive(grandchild), "sleep grandchild survived the group kill");
     }
 
     #[test]
