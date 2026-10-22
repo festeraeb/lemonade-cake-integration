@@ -1,17 +1,14 @@
 #!/bin/bash
 # Full-chain validation: Lemonade -> lemonade-cake-bridge -> Cake -> Qwen3-0.6B
 set -u
-LEMOND=/home/cesarops/repos/lemonade-upstream/build/lemond
-OUT=/tmp/e2e
+LEMOND="${LEMOND:?set LEMOND to the path of the lemond binary}"
+MODEL="${MODEL:-evilsocket/Qwen3-0.6B}"
+OUT="${OUT:-${TMPDIR:-/tmp}/e2e}"
 LOG_LEMOND=$OUT/lemond.log
 mkdir -p "$OUT"
 
-pkill -f 'lemonade-cake-bridge' 2>/dev/null
-pkill -f 'cake run' 2>/dev/null
-sleep 1
-
 echo "== [1] starting lemond on :8100 =="
-nohup "$LEMOND" --port 8100 > "$LOG_LEMOND" 2>&1 &
+setsid "$LEMOND" --port 8100 > "$LOG_LEMOND" 2>&1 < /dev/null &
 LEMOND_PID=$!
 echo "lemond pid: $LEMOND_PID"
 
@@ -24,7 +21,7 @@ done
 echo "== [2] loading model with recipe=cake =="
 curl -s -X POST http://127.0.0.1:8100/api/v1/load \
   -H 'Content-Type: application/json' \
-  -d '{"model":"evilsocket/Qwen3-0.6B","recipe":"cake"}' > "$OUT/load.json"
+  -d '{"model":"'"$MODEL"'","recipe":"cake"}' > "$OUT/load.json"
 echo "load exit: $?"
 cat "$OUT/load.json"; echo
 
@@ -32,7 +29,7 @@ cat "$OUT/load.json"; echo
 sleep 5
 
 echo "== [3] locate bridge child process/port =="
-pgrep -af 'lemonade-cake-bridge|cake run' > "$OUT/procs.txt" 2>&1
+ps -eo pid,args | grep -E '[l]emonade-cake-bridge|[c]ake master' > "$OUT/procs.txt" 2>&1
 ss -tlnp > "$OUT/listeners.txt" 2>&1
 BRIDGE_PORT=$(ss -tlnp 2>/dev/null | grep lemonade-cake-bridge | grep -oE '127\.0\.0\.1:[0-9]+' | head -1 | cut -d: -f2)
 echo "bridge port: ${BRIDGE_PORT:-unknown}"
@@ -66,12 +63,12 @@ fi
 echo "== [8] unload =="
 curl -s -X POST http://127.0.0.1:8100/api/v1/unload > "$OUT/unload.json"
 sleep 6
-pgrep -af 'lemonade-cake-bridge|cake run' > "$OUT/procs_after_unload.txt" 2>&1 || true
+ps -eo pid,args | grep -E '[l]emonade-cake-bridge|[c]ake master' > "$OUT/procs_after_unload.txt" 2>&1 || true
 
 echo "== [9] reload (restart) =="
 curl -s -X POST http://127.0.0.1:8100/api/v1/load \
   -H 'Content-Type: application/json' \
-  -d '{"model":"evilsocket/Qwen3-0.6B","recipe":"cake"}' > "$OUT/reload.json"
+  -d '{"model":"'"$MODEL"'","recipe":"cake"}' > "$OUT/reload.json"
 sleep 8
 curl -s --max-time 240 -X POST http://127.0.0.1:8100/api/v1/chat/completions \
   -H 'Content-Type: application/json' \
@@ -84,5 +81,5 @@ curl -s -X POST http://127.0.0.1:8100/api/v1/unload > "$OUT/unload2.json"
 sleep 6
 kill "$LEMOND_PID" 2>/dev/null
 sleep 4
-pgrep -af 'lemonade-cake-bridge|cake run' > "$OUT/procs_final.txt" 2>&1 || echo "no leftover processes" >> "$OUT/procs_final.txt"
+ps -eo pid,args | grep -E '[l]emonade-cake-bridge|[c]ake master' > "$OUT/procs_final.txt" 2>&1 || echo "no leftover processes" >> "$OUT/procs_final.txt"
 echo "== done =="

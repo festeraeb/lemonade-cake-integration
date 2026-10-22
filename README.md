@@ -35,22 +35,35 @@ Cake documents these endpoints:
 - `GET /v1/models`
 - `GET /api/v1/topology`
 
-Cake's exact CLI flags for binding a custom port may change. The bridge therefore
-accepts a command template instead of hard-coding Cake's CLI. Set
-`LEMONADE_CAKE_COMMAND` or pass `--cake-command` with `{model}` and `{port}`
-placeholders.
+Cake's CLI may change between releases. The bridge therefore accepts a command
+template instead of hard-coding it. Set `LEMONADE_CAKE_COMMAND` or pass
+`--cake-command` with `{model}`, `{port}` and `{device}` placeholders
+(`{device}` comes from `--cake-device` / `LEMONADE_CAKE_DEVICE`, default 0).
+
+The default targets cake 0.1.0, which has the subcommands `master`, `worker`,
+`download`, `models`, `chat` and `split`; there is no `cake serve` and no
+`--port` flag. The API is enabled with `cake master --api <addr>`.
 
 Example:
 
 ```bash
-LEMONADE_CAKE_COMMAND='cake serve {model} --port {port}' \
+LEMONADE_CAKE_COMMAND='cake master --model {model} --api 127.0.0.1:{port} --device {device}' \
   lemonade-cake-bridge \
   --listen-port 19001 \
   --cake-port 19002 \
   --model evilsocket/Qwen2.5-Coder-1.5B-Instruct
 ```
 
-If current Cake uses a different port flag, only the command template changes.
+If a newer Cake changes its flags, only the command template changes.
+
+## Testing without Cake
+
+`scripts/fake_cake.py` is a stdlib-only stub that serves `/v1/models`,
+`/api/v1/topology` and blocking/SSE `/v1/chat/completions`, enough to satisfy
+the bridge's readiness check and runtime fingerprint. Everything it returns is
+labelled `fake-cake-stub`; it runs no model, so results prove bridge plumbing
+only, never Cake behaviour or GPU performance. `cargo test` in `rust_bridge`
+covers the bridge's pure logic.
 
 ## Validation order
 

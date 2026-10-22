@@ -46,9 +46,13 @@ struct Args {
     #[arg(
         long,
         env = "LEMONADE_CAKE_COMMAND",
-        default_value = "cake serve {model} --port {port}"
+        default_value = "cake master --model {model} --api 127.0.0.1:{port} --device {device}"
     )]
     cake_command: String,
+
+    /// GPU device index substituted for `{device}` in the Cake command template.
+    #[arg(long, env = "LEMONADE_CAKE_DEVICE", default_value_t = 0)]
+    cake_device: u32,
 
     #[arg(long, default_value_t = 600)]
     startup_timeout_seconds: u64,
@@ -139,10 +143,23 @@ fn now_ms() -> u128 {
         .as_millis()
 }
 
-fn render_command(template: &str, model: &str, port: u16) -> String {
+fn render_command(template: &str, model: &str, port: u16, device: u32) -> String {
     template
         .replace("{model}", model)
         .replace("{port}", &port.to_string())
+        .replace("{device}", &device.to_string())
+}
+
+/// The runtime fingerprint only claims Cake when `/v1/models` carried an
+/// OpenAI-style `data` array.
+fn models_identify_cake(models: &Value) -> bool {
+    models.get("data").map(Value::is_array).unwrap_or(false)
+}
+
+fn command_sha256(command: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(command.as_bytes());
+    format!("{:x}", hasher.finalize())
 }
 
 #[cfg(unix)]
@@ -160,7 +177,12 @@ fn command_from_template(rendered: &str) -> Command {
 }
 
 async fn launch_cake(args: &Args) -> Result<Child> {
-    let rendered = render_command(&args.cake_command, &args.model, args.cake_port);
+    let rendered = render_command(
+        &args.cake_command,
+        &args.model,
+        args.cake_port,
+        args.cake_device,
+    );
     info!(command = %rendered, "launching Cake");
 
     let mut cmd = command_from_template(&rendered);
@@ -251,14 +273,7 @@ async fn runtime_fingerprint(State(state): State<Arc<AppState>>) -> Response {
         _ => json!(null),
     };
 
-    let observed_cake = models
-        .get("data")
-        .and_then(Value::as_array)
-        .map(|_| true)
-        .unwrap_or(false);
-
-    let mut hasher = Sha256::new();
-    hasher.update(state.cake_command.as_bytes());
+    let observed_cake = models_identify_cake(&models);
 
     Json(RuntimeFingerprint {
         schema: "lemonade.runtime-fingerprint.v1",
@@ -269,7 +284,7 @@ async fn runtime_fingerprint(State(state): State<Arc<AppState>>) -> Response {
         cake_base_url: state.cake_base_url.clone(),
         bridge_pid: std::process::id(),
         cake_pid: state.cake_pid().await,
-        cake_command_sha256: format!("{:x}", hasher.finalize()),
+        cake_command_sha256: command_sha256(&state.cake_command),
         verified_at_unix_ms: now_ms(),
         cake_models_observed: models,
         runtime_identity_verified: observed_cake,
@@ -455,7 +470,12 @@ async fn main() -> Result<()> {
         client,
         cake_base_url,
         model: args.model.clone(),
-        cake_command: render_command(&args.cake_command, &args.model, args.cake_port),
+        cake_command: render_command(
+            &args.cake_command,
+            &args.model,
+            args.cake_port,
+            args.cake_device,
+        ),
         child: Mutex::new(Some(child)),
     });
 
@@ -490,4 +510,77 @@ async fn main() -> Result<()> {
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn render_command_substitutes_all_placeholders() {
+        let out = render_command("cake master --model {model} --api 127.0.0.1:{port} --device {device}", "org/m", 18080, 2);
+        assert_eq!(out, "cake master --model org/m --api 127.0.0.1:18080 --device 2");
+    }
+
+    #[test]
+    fn render_command_replaces_repeated_placeholders_and_keeps_unknown() {
+        let out = render_command("{port}-{port} {other}", "m", 9, 0);
+        assert_eq!(out, "9-9 {other}");
+    }
+
+    #[test]
+    fn default_template_matches_cake_0_1_0_cli() {
+        let args = Args::parse_from(["bridge", "--listen-port", "1", "--model", "m"]);
+        assert!(args.cake_command.starts_with("cake master "));
+        assert!(args.cake_command.contains("--api 127.0.0.1:{port}"));
+        assert!(!args.cake_command.contains("serve"));
+        assert_eq!(args.cake_device, 0);
+    }
+
+    #[test]
+    fn models_identity_requires_data_array() {
+        assert!(models_identify_cake(&json!({"data": []})));
+        assert!(models_identify_cake(&json!({"data": [{"id": "x"}]})));
+        assert!(!models_identify_cake(&json!({"data": {}})));
+        assert!(!models_identify_cake(&json!({"models": []})));
+        assert!(!models_identify_cake(&json!(null)));
+    }
+
+    #[test]
+    fn command_sha256_is_stable_and_input_sensitive() {
+        assert_eq!(
+            command_sha256("abc"),
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        );
+        assert_ne!(command_sha256("a"), command_sha256("b"));
+    }
+
+    #[test]
+    fn placement_plan_defaults_optional_fields() {
+        let plan: PlacementPlan = serde_json::from_value(json!({"schema": "s"})).unwrap();
+        assert_eq!(plan.schema, "s");
+        assert!(plan.assignments.is_empty());
+        assert!(plan.run_id.is_none() && plan.model.is_none() && plan.reason.is_none());
+        assert!(serde_json::from_value::<PlacementPlan>(json!({"assignments": []})).is_err());
+    }
+
+    #[test]
+    fn capabilities_are_shadow_only() {
+        let v = serde_json::to_value(BridgeCapabilities {
+            bridge_schema: "x",
+            inference: true,
+            streaming: true,
+            models: true,
+            cake_topology: true,
+            moe_router_visibility: Visibility::Unknown,
+            expert_residency_visibility: Visibility::Unknown,
+            expert_transfer_visibility: Visibility::Unknown,
+            expert_control: ControlCapability::ShadowOnly,
+            placement_plan_validation: true,
+            placement_plan_apply: false,
+        })
+        .unwrap();
+        assert_eq!(v["expert_control"], "shadow_only");
+        assert_eq!(v["moe_router_visibility"], "unknown");
+    }
 }

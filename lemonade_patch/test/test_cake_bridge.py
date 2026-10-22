@@ -2,14 +2,13 @@
 import json
 import os
 import sys
-import requests
+import urllib.request
 
 base = os.environ.get("CAKE_BRIDGE_URL", "http://127.0.0.1:19001")
 
 def get(path):
-    r = requests.get(base + path, timeout=10)
-    r.raise_for_status()
-    return r.json()
+    with urllib.request.urlopen(base + path, timeout=10) as r:
+        return json.load(r)
 
 print("health:", json.dumps(get("/health"), indent=2))
 print("fingerprint:", json.dumps(get("/internal/runtime-fingerprint"), indent=2))
@@ -22,6 +21,10 @@ payload = {
     "stream": False,
     "max_tokens": 16,
 }
-r = requests.post(base + "/v1/chat/completions", json=payload, timeout=120)
-r.raise_for_status()
-print("chat:", json.dumps(r.json(), indent=2))
+req = urllib.request.Request(
+    base + "/v1/chat/completions",
+    data=json.dumps(payload).encode(),
+    headers={"Content-Type": "application/json"},
+)
+with urllib.request.urlopen(req, timeout=120) as r:
+    print("chat:", json.dumps(json.load(r), indent=2))
