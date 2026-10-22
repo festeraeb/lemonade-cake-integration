@@ -6,8 +6,10 @@
 #include "lemon/backends/cake/cake.h"
 #include "lemon/utils/aixlog.hpp"
 #include "lemon/utils/http_client.h"
+#include "lemon/utils/path_utils.h"
 #include "lemon/utils/process_manager.h"
 
+#include <filesystem>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -23,6 +25,27 @@ CakeServer::~CakeServer() {
     unload();
 }
 
+// The bridge is not installed by Lemonade. Look for it, in order: LEMONADE_CAKE_BRIDGE (a full path),
+// PATH, then the directory lemond runs from.
+static std::string find_bridge_executable() {
+    const std::string from_env = utils::get_environment_variable_utf8("LEMONADE_CAKE_BRIDGE");
+    if (!from_env.empty()) {
+        if (!std::filesystem::exists(from_env)) {
+            throw std::runtime_error("LEMONADE_CAKE_BRIDGE points to a missing file: " + from_env);
+        }
+        return from_env;
+    }
+    const std::string binary = cake::spec()->binary;
+    if (!utils::find_executable_in_path(binary).empty()) {
+        return binary;
+    }
+    const std::filesystem::path beside = std::filesystem::path(utils::get_executable_dir()) / binary;
+    if (std::filesystem::exists(beside)) {
+        return beside.string();
+    }
+    throw std::runtime_error(binary + " not found: set LEMONADE_CAKE_BRIDGE, put it on PATH, or place it next to lemond");
+}
+
 void CakeServer::load(const std::string& model_name,
                       const ModelInfo& model_info,
                       const RecipeOptions& options,
@@ -32,9 +55,12 @@ void CakeServer::load(const std::string& model_name,
         throw std::runtime_error("Cake model checkpoint is empty for: " + model_name);
     }
 
-    std::string configured_port = options.get_option("cake_port");
-    if (!configured_port.empty()) {
-        cake_private_port_ = std::stoi(configured_port);
+    // The recipe default is the number 18080 (cake.h); a request may also pass the port as a string.
+    const json configured_port = options.get_option("cake_port");
+    if (configured_port.is_number_integer()) {
+        cake_private_port_ = configured_port.get<int>();
+    } else if (configured_port.is_string() && !configured_port.get<std::string>().empty()) {
+        cake_private_port_ = std::stoi(configured_port.get<std::string>());
     }
 
     port_ = choose_port();
@@ -42,8 +68,7 @@ void CakeServer::load(const std::string& model_name,
         throw std::runtime_error("Failed to allocate Lemonade private port for Cake bridge");
     }
 
-    std::string bridge_executable =
-        BackendUtils::get_backend_binary_path(*cake::spec(), "");
+    const std::string bridge_executable = find_bridge_executable();
 
     std::vector<std::string> args = {
         "--listen-port", std::to_string(port_),
